@@ -57,70 +57,126 @@ function ConvertTo-SplunkView {
     return $view
 }
 
-$output_path = "$($env:temp)\dashboards"
-if (!(Test-Path -Path $output_path)) { mkdir -Path $output_path -ErrorAction SilentlyContinue }
+# add type allowing interaction with eventlog data
+Add-Type -AssemblyName System.Core
 
 # Get the EventLogSession object
 $EventSession = [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession;
 
-# Get the ETW provider names
 $EventProviderNames = $EventSession.GetProviderNames()
-$ProviderMetadataList = @()
-$MenuItems = @()
+
+# link providers to log names
+$LogNamesDB = @()
+$Progress = 0
 foreach ($EventProviderName in $EventProviderNames) {
+
+    $Progress++
+
+    Write-Progress -activity "Building list log names linked from log providers." -status "Evaluating provider $($Progress) of $($EventProviderNames.count) - [$($EventProviderName)]." -PercentComplete $(($Progress/$EventProviderNames.count)*100)
+    
     Try {
-        $ProviderMetadataList += New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $EventProviderName -ErrorAction SilentlyContinue
-        $MenuItem = @()
-        foreach ($Link in $ProviderMetadataList[-1].LogLinks) {
-            $CustomEvent = new-object -TypeName PSObject
-            $CustomEvent | Add-Member -MemberType NoteProperty -Name LogName -Value $Link.LogName
-            $CustomEvent | Add-Member -MemberType NoteProperty -Name Provider -Value $ProviderMetadataList[-1].Name
-            $MenuItem += $CustomEvent
-        }
-        $MenuItems += $MenuItem
-
+        $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $EventProviderName
     } catch {
-        Write-Debug "Problem getting provider metadata for $($EventProviderName)."
+        Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($EventProviderName)."
+        continue
     }
-}
 
-# Prompt user to select one to explore
-$SelectedLogName  = $MenuItems | Select-Object -Unique -Property LogName | Sort-Object -Property LogName  | Out-GridView -PassThru -Title "Select an EventLog Provider of Interest"
+    # if there is not metadata or log link, skip
+    if (($metaData) -and ($metadata.LogLinks)) {
 
-# Get associated providers for selected log
-$AssociatedProviders = $Menuitems | ?{$_.LogName -eq $SelectedLogName.LogName}
+        # some providers are linked to multiuple log types, check each link
+        foreach ($LogLink in $metaData.LogLinks) { 
 
-# Get metadata for selected providers
-$Events  = @()
-foreach ($ProviderMetadataItem in $ProviderMetadataList) {
-    foreach ($ProviderMetadataItemLogLink in $ProviderMetadataItem.LogLinks) {
-        foreach ($AssociatedProvider in $AssociatedProviders) {
-            if ($ProviderMetadataItemLogLink.LogName -match $AssociatedProvider.LogName) {
-                foreach ($Event in $ProviderMetadataItem.Events) {
-
-                    $Event.Events | Select-Object -Property Id, OpCode, Task, Keywords, Description, Template, LogLink
-
-                    $CustomEvent = new-object -TypeName PSObject
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "LogName" -Value "$($AssociatedProvider.LogName)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Provider" -Value "$($AssociatedProvider.Provider)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Id" -Value "$($Event.Id)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "OpCode" -Value "$($Event.Opcode.DisplayName)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Task" -Value "$($Event.Task.DisplayName)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Keywords" -Value "$($Event.Keywords.DisplayName)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Description" -Value "$($Event.Description)"
-                    $CustomEvent | Add-Member -MemberType NoteProperty -Name "Template" -Value "$($Event.Template)"
-
-                    $Events += $CustomEvent
-
+            Try {
+                $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
+        
+                $info = @{
+                    "LogName" = $LogLink.LogName
+                    "ProviderName" = $EventProviderName
+                    "IsEnabled" = $EventLogConfiguration.IsEnabled
+                    "IsClassic" = $EventLogConfiguration.IsClassicLog
+                    "Type" = $EventLogConfiguration.LogType                                          
                 }
 
+                $LogNamesDB += New-Object -TypeName PSObject -Property $info
+            } catch {
+                Write-debug "Error accessing System.Diagnostics.Eventing.Reader.EventLogConfiguration properties of $($LogLink.LogName)."
             }
-       }
+
+        }
     }
 }
 
-# Prompt user to select one to explore
-$SelectedEvents = $Events | Sort-Object -Property Id | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
+# Present the user a list of distinct logs they want to examine event details of.
+#?{$_.IsClassic -eq $True} | 
+[array]$Selections = $LogNamesDB | Select-object LogName, ProviderName, Type, IsEnabled, IsClassic | sort-object -property LogName, ProviderNane | Out-GridView -Title "Select one or more log files to extract event id details from." -PassThru
+
+# Now build a database of the event id details of each log selected
+$EventDB = @()
+$Progress = 0
+foreach ($Selection in $Selections) {
+    $Progress++
+
+    Write-Progress -activity "Loading event log metadata from provider of selected logs." -status "Evaluating log $($Progress) of $($Selections.count) - [$($Selection)]." -PercentComplete $(($Progress/$Selections.count)*100)
+
+    write-debug "Looking for [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
+
+    Try {
+        $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $Selection.ProviderName
+    } catch {
+        Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($Provider)."
+        continue
+    }
+
+    # if there is not metadata or log link, skip
+    if (($metaData) -and ($metadata.LogLinks)) {
+
+        # some providers are linked to multiuple log types, check each link
+        foreach ($LogLink in $metaData.LogLinks) {       
+
+            # now make sure this link matches one the user selected.
+            if ($LogLink.LogName -eq $Selection.LogName) {
+
+                write-debug "Found link to selected [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
+
+                $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
+
+                foreach ($eventData in $metaData.Events) {
+
+                    # only append if there is a useful description
+                    if (($eventdata.Description) -and ($eventdata.Level.DisplayName -ne $null)) {
+
+                        $info = @{
+                            "Provider" =  $Selection.ProviderName
+
+                            "LogName" = $LogLink.LogName
+                            "EventID" = $eventdata.Id
+                            "Version" = $eventdata.Version
+                            "Level" = $eventdata.Level.DisplayName
+                            "Description" = $eventdata.Description
+                                
+                            "IsEnabled" = $EventLogConfiguration.IsEnabled
+                            "IsClassic" = $EventLogConfiguration.IsClassicLog                               
+                            "Type" = $EventLogConfiguration.LogType
+
+                            "Index" = "$($LogLink.LogName) $($Selection.ProviderName) $($EventLogConfiguration.LogType) $($eventdata.Id) $($eventdata.Version)"
+
+                        }
+
+                        $EventDB += New-Object -TypeName PSObject -Property $info
+
+                    }
+
+                }
+            }
+        }
+    }
+}
+
+
+$EventDB = ($EventDB | Sort-Object Index | Get-Unique -AsString)
+
+$SelectedEvents = $EventDB | Sort-Object -Property Id | Select-Object -Property LogName, Provider, Type, EventID, Version, Level, Description | sort-object -property Provider, Type, LogName, EventID | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
 
 foreach ($SelectedEvent in $SelectedEvents) {
     $Description = (($SelectedEvent.Description) -split "`n")[0]
@@ -154,3 +210,4 @@ foreach ($SelectedEvent in $SelectedEvents) {
     write-host "Writing exploratory Splunk dashboard for [$($SelectedEvent.LogName)] EventID [$($SelectedEvent.Id)] to [$($output_filepath)]."
     Add-Content -Path $output_filepath -value $View
 }
+
