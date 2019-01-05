@@ -1,4 +1,15 @@
-﻿function ConvertTo-SplunkSearch {
+﻿<# TODO:
+if logtype is classic, get localized $metaData.MessageFilePath
+e.g. c:\windows\syswow64\en-us\esent.dll.mui 
+The file has a message table which contains the ID (in hex) and Messages (as strings).  
+Unforunately, ID/message levels are not defined for classic logs
+
+https://nsis.sourceforge.io/Reading_Message_Table_resources_from_DLL_files
+GetSystemDefaultLangID --> LoadLibraryExW --> FormatMessageW --> FreeLibrary
+#>
+
+
+function ConvertTo-SplunkSearch {
     param($SelectedEvent)
     # Transform event into splunk search:
     $search = "source=`"*WinEventLog:$($SelectedEvent.LogName)`" `"<EventID>$($SelectedEvent.Id)</EventID>`" OR EventCode=`"$($SelectedEvent.Id)`""  #primary search.. Can't assume eventcode is extracted yet.
