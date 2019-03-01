@@ -1,4 +1,4 @@
-﻿<# TODO:
+<# TODO:
 if logtype is classic, get localized $metaData.MessageFilePath
 e.g. c:\windows\syswow64\en-us\esent.dll.mui 
 The file has a message table which contains the ID (in hex) and Messages (as strings).  
@@ -191,14 +191,14 @@ foreach ($SelectedAction in $SelectedActions) {
             $Content += "[WinEventLog://$($LogName)]"
             $Content += "index = main"
             
-            # build a list of EventCodes to include in a sample filtering array
-            $eEventCodes = ""
-            $Events | group EventID | Select -ExpandProperty Name | %{if ($eEventCodes -eq "") { $eEventCodes += $_ } else { $eEventCodes += "|" + $_ }} ; $eEventCodes = "(" + $eEventCodes + ")" 
-            $content += "#whitelist.1 = Type=%^$($NameTypes)$%"
-
             # build a list of EventTypes to include in a sample filtering array
             $NameTypes="" 
             $Events | group Level | select -expandproperty Name | %{if ($NameTypes -eq "") { $NameTypes += $_ } else { $NameTypes += "|" + $_ }} ; $NameTypes = "(" + $NameTypes + ")"
+            $content += "#whitelist.1 = Type=%^$($NameTypes)$%"
+
+            # build a list of EventCodes to include in a sample filtering array
+            $eEventCodes = ""
+            $Events | group EventID | Select -ExpandProperty Name | %{if ($eEventCodes -eq "") { $eEventCodes += $_ } else { $eEventCodes += "|" + $_ }} ; $eEventCodes = "(" + $eEventCodes + ")" 
             $content += "#blacklist.1 = EventCode=%^$($eEventCodes)$%"
 
             # build a list of event descriptions to reference in inputs file
