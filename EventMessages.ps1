@@ -12,7 +12,7 @@ GetSystemDefaultLangID --> LoadLibraryExW --> FormatMessageW --> FreeLibrary
 function ConvertTo-SplunkSearch {
     param($SelectedEvent)
     # Transform event into splunk search:
-    $search = "source=`"*WinEventLog:$($SelectedEvent.LogName)`" `"<EventID>$($SelectedEvent.Id)</EventID>`" OR EventCode=`"$($SelectedEvent.Id)`""  #primary search.. Can't assume eventcode is extracted yet.
+    $search = "source=`"*WinEventLog:$($SelectedEvent.LogName)`" `"<EventID>$($SelectedEvent.EventID)</EventID>`" OR EventCode=`"$($SelectedEvent.EventID)`""  #primary search.. Can't assume eventcode is extracted yet.
 
     # extract the "data" fields that are unique to each event id but defined in provider template.
     $dataitems = $SelectedEvent.Template -split "`n" | Select-String -Pattern "data name="
@@ -27,45 +27,6 @@ function ConvertTo-SplunkSearch {
     }
     $search += "`n | table _time host source EventID $($fields) `n | sort 0 - _time"
     return $search
-}
-
-function ConvertTo-SplunkView {
-    param($SelectedEvent,$search,$label)
-    $view = "<form theme=`"light`">"
-    $view += "`n  <label>$($label)</label>"
-    $view += "`n  <fieldset submitButton=`"true`">"
-    $view += "`n    <input type=`"time`" token=`"field1`">"
-    $view += "`n      <label></label>"
-    $view += "`n      <default>"
-    $view += "`n        <earliest>-7d@h</earliest>"
-    $view += "`n        <latest>now</latest>"
-    $view += "`n      </default>"
-    $view += "`n    </input>"
-    $view += "`n  </fieldset>"
-    $view += "`n  <row>"
-    $view += "`n    <panel>"
-    $view += "`n      <table>"
-    $view += "`n        <search>"
-    $view += "`n          <query>"
-    $view += "`n          $($search)"
-    $view += "`n		  </query>"
-    $view += "`n          <earliest>`$field1.earliest$</earliest>"
-    $view += "`n          <latest>`$field1.latest$</latest>"
-    $view += "`n          <sampleRatio>1</sampleRatio>"
-    $view += "`n        </search>"
-    $view += "`n        <option name=`"count`">20</option>"
-    $view += "`n        <option name=`"dataOverlayMode`">none</option>"
-    $view += "`n        <option name=`"drilldown`">none</option>"
-    $view += "`n        <option name=`"percentagesRow`">false</option>"
-    $view += "`n        <option name=`"refresh.display`">progressbar</option>"
-    $view += "`n        <option name=`"rowNumbers`">true</option>"
-    $view += "`n        <option name=`"totalsRow`">false</option>"
-    $view += "`n        <option name=`"wrap`">true</option>"
-    $view += "`n      </table>"
-    $view += "`n    </panel>"
-    $view += "`n  </row>"
-    $view += "`n</form>"
-    return $view
 }
 
 # add type allowing interaction with eventlog data
@@ -164,7 +125,7 @@ foreach ($Selection in $Selections) {
                             "EventID" = $eventdata.Id
                             "Version" = $eventdata.Version
                             "Level" = $eventdata.Level.DisplayName
-                            "Description" = $eventdata.Description
+                            "Description" = $eventdata.Description -replace "\n","; "
                                 
                             "IsEnabled" = $EventLogConfiguration.IsEnabled
                             "IsClassic" = $EventLogConfiguration.IsClassicLog                               
@@ -189,36 +150,92 @@ $EventDB = ($EventDB | Sort-Object Index | Get-Unique -AsString)
 
 $SelectedEvents = $EventDB | Sort-Object -Property Id | Select-Object -Property LogName, Provider, Type, EventID, Version, Level, Description | sort-object -property Provider, Type, LogName, EventID | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
 
-foreach ($SelectedEvent in $SelectedEvents) {
-    $Description = (($SelectedEvent.Description) -split "`n")[0]
-    $Description = (($Description) -split ":")[0]
-    $Description = (($Description) -split "\.")[0].trim()
-
-    $label = "WinEventLog:$($SelectedEvent.LogName):$($SelectedEvent.Id):$($Description)" 
-
-    $Search = ConvertTo-SplunkSearch -SelectedEvent $SelectedEvent
-    $View = ConvertTo-SplunkView -SelectedEvent $SelectedEvent -search ([Security.SecurityElement]::Escape($Search)) -label $label
+$PossibleActions = @("Export selected items to CSV file","Convert selected to Splunk inputs","Convert selected to Splunk searches")
+$SelectedActions = $PossibleActions | Out-GridView -PassThru -Title "Select action(s) to take on selected items."
 
 
-    # remove illegal chars for filenames
-    $labelEscape = $label -replace "\\","_"
-    $labelEscape = $labelEscape -replace "/","_"
-    $labelEscape = $labelEscape -replace ":","_"
-    $labelEscape = $labelEscape -replace "\*","_"
-    $labelEscape = $labelEscape -replace "\?","_"
-    $labelEscape = $labelEscape -replace "\`"","_"
-    $labelEscape = $labelEscape -replace "`'","_"
-    $labelEscape = $labelEscape -replace "<","_"
-    $labelEscape = $labelEscape -replace ">","_"
-    $labelEscape = $labelEscape -replace "\|","_"
-    $labelEscape = $labelEscape -replace "\%","_"
+# get a random string for output filenames to share
+$rando = get-random -Minimum 100 -Maximum 999
 
+foreach ($SelectedAction in $SelectedActions) {
 
-    $output_filename = $labelEscape
-    $output_filepath = "$($output_path)\$($output_filename).xml"
-    if (Test-Path -Path $output_filepath) { Remove-Item -Path $output_filepath -Force }
+    if ($SelectedAction -match "CSV") {
+        # do the CSV file task
 
-    write-host "Writing exploratory Splunk dashboard for [$($SelectedEvent.LogName)] EventID [$($SelectedEvent.Id)] to [$($output_filepath)]."
-    Add-Content -Path $output_filepath -value $View
+        # prepare the temp file
+        $EventMessagesOutputCSV = "$($env:temp)\EventMessages_csv_$($rando).csv"
+        if (Test-Path -Path $EventMessagesOutputCSV) { Remove-Item -Path $EventMessagesOutputCSV -Force }
+
+        # commit the output and display for user
+        $SelectedEvents | Export-Csv -Path $EventMessagesOutputCSV -NoTypeInformation
+        write-host "CSV file written to $($EventMessagesOutputCSV)."
+        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputCSV
+    }
+
+    if ($SelectedAction -match "inputs") {
+        # do the Splunk inputs file task
+
+        # prepare the temp file
+        $EventMessagesOutputInputs = "$($env:temp)\EventMessages_csv_$($rando).csv"
+        if (Test-Path -Path $EventMessagesOutputInputs) { Remove-Item -Path $EventMessagesOutputInputs-Force }
+
+        # prepare the content
+        $Content = @()
+
+        # group the selected events by sourcetype
+        $LogNames = ($SelectedEvents | group LogName).Name
+
+        foreach ($LogName in $LogNames) {
+            $Events = $SelectedEvents | ?{$_.LogName -eq "$($LogName)"}
+            $Content += ""
+            $Content += "[WinEventLog://$($LogName)]"
+            $Content += "index = main"
+            
+            # build a list of EventCodes to include in a sample filtering array
+            $eEventCodes = ""
+            $Events | group EventID | Select -ExpandProperty Name | %{if ($eEventCodes -eq "") { $eEventCodes += $_ } else { $eEventCodes += "|" + $_ }} ; $eEventCodes = "(" + $eEventCodes + ")" 
+            $content += "#whitelist.1 = Type=%^$($NameTypes)$%"
+
+            # build a list of EventTypes to include in a sample filtering array
+            $NameTypes="" 
+            $Events | group Level | select -expandproperty Name | %{if ($NameTypes -eq "") { $NameTypes += $_ } else { $NameTypes += "|" + $_ }} ; $NameTypes = "(" + $NameTypes + ")"
+            $content += "#blacklist.1 = EventCode=%^$($eEventCodes)$%"
+
+            # build a list of event descriptions to reference in inputs file
+            $eDescriptions = @()
+            foreach ($Event in $Events) {
+                $eDescriptions += "# EventID: $($Event.EventID), Level: $($Event.Level), Description: $($Event.Description)"
+            }
+            $content += $eDescriptions
+            Add-Content -Path $EventMessagesOutputInputs -value $Content
+        }
+      
+        # commit the output and display for user
+        write-host "Splunk inputs written to $($EventMessagesOutputInputs)."
+        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputInputs
+
+    }
+
+    if ($SelectedAction -match "searches") {
+        # do the Splunk searches 
+
+        # prepare the temp file
+        $EventMessagesOutputSearch = "$($env:temp)\EventMessages_searches_$($rando).csv"
+        if (Test-Path -Path $EventMessagesOutputSearch) { Remove-Item -Path $EventMessagesOutputSearch -Force }
+
+        # prepare the content
+        $Content = @()
+        foreach ($SelectedEvent in $SelectedEvents) {
+            $Search = ConvertTo-SplunkSearch -SelectedEvent $SelectedEvent
+            $Content += "`n$($search)"
+        }
+        
+        # commit the output and display for user
+        Add-Content -Path $EventMessagesOutputSearch -value $Content
+        write-host "Splunk SPL statements written to $($EventMessagesOutputSearch)."
+        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputSearch
+    }
 }
 
+
+#>
