@@ -123,11 +123,7 @@ foreach ($Selection in $Selections) {
 
             $LogName = [string]($eventdata.LogLink).LogName
 
-            if ($LogName -ne $Selection.LogName) { 
-                write-host "skipping $($LogName)." 
-            } else {
-                write-host "including $($LogName)." 
-            
+            if ($LogName -eq $Selection.LogName) { 
 
                 # only append if there is a useful description
                 if (($eventdata.Description) -and ($eventdata.Level.DisplayName -ne $null)) {
@@ -148,8 +144,6 @@ foreach ($Selection in $Selections) {
                         "Index" = "$($LogLink.LogName) $($Selection.ProviderName) $($EventLogConfiguration.LogType) $($eventdata.Id) $($eventdata.Version)"
 
                     }
-
-                    $Info
 
                     $EventDB += New-Object -TypeName PSObject -Property $info
 
