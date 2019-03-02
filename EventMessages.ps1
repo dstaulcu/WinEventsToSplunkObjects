@@ -38,47 +38,53 @@ $EventSession = [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSess
 $EventProviderNames = $EventSession.GetProviderNames()
 
 # link providers to log names
-$LogNamesDB = @()
-$Progress = 0
-foreach ($EventProviderName in $EventProviderNames) {
+if (!($LogNamesDB)) {
+    $LogNamesDB = @()
+    $Progress = 0
+    foreach ($EventProviderName in $EventProviderNames) {
 
-    $Progress++
+        $Progress++
 
-    Write-Progress -activity "Building list log names linked from log providers." -status "Evaluating provider $($Progress) of $($EventProviderNames.count) - [$($EventProviderName)]." -PercentComplete $(($Progress/$EventProviderNames.count)*100)
+        Write-Progress -activity "Building list log names linked from log providers." -status "Evaluating provider $($Progress) of $($EventProviderNames.count) - [$($EventProviderName)]." -PercentComplete $(($Progress/$EventProviderNames.count)*100)
     
-    Try {
-        $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $EventProviderName
-    } catch {
-        Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($EventProviderName)."
-        continue
-    }
+        Try {
+            $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $EventProviderName
+        } catch {
+            Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($EventProviderName)."
+            continue
+        }
 
-    # if there is not metadata or log link, skip
-    if (($metaData) -and ($metadata.LogLinks)) {
+        # if there is not metadata or log link, skip
+        if (($metaData) -and ($metadata.LogLinks)) {
 
-        # some providers are linked to multiuple log types, check each link
-        foreach ($LogLink in $metaData.LogLinks) { 
+            # some providers are linked to multiuple log types, check each link
+            foreach ($LogLink in $metaData.LogLinks) { 
 
-            Try {
-                $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
+                Try {
+                    $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
+
+                    # skip analytic, debug and classic logs
+                    if (($EventLogConfiguration.LogType -notmatch "(Analytical|Debug)") -and ($EventLogConfiguration.IsClassicLog -eq $false)) {
+
         
-                $info = @{
-                    "LogName" = $LogLink.LogName
-                    "ProviderName" = $EventProviderName
-                    "IsEnabled" = $EventLogConfiguration.IsEnabled
-                    "IsClassic" = $EventLogConfiguration.IsClassicLog
-                    "Type" = $EventLogConfiguration.LogType                                          
+                        $info = @{
+                            "LogName" = $LogLink.LogName
+                            "ProviderName" = $EventProviderName
+                            "IsEnabled" = $EventLogConfiguration.IsEnabled
+                            "IsClassic" = $EventLogConfiguration.IsClassicLog
+                            "Type" = $EventLogConfiguration.LogType                                          
+                        }
+
+                        $LogNamesDB += New-Object -TypeName PSObject -Property $info
+                    }
+                } catch {
+                    Write-debug "Error accessing System.Diagnostics.Eventing.Reader.EventLogConfiguration properties of $($LogLink.LogName)."
                 }
 
-                $LogNamesDB += New-Object -TypeName PSObject -Property $info
-            } catch {
-                Write-debug "Error accessing System.Diagnostics.Eventing.Reader.EventLogConfiguration properties of $($LogLink.LogName)."
             }
-
         }
     }
 }
-
 # Present the user a list of distinct logs they want to examine event details of.
 #?{$_.IsClassic -eq $True} | 
 [array]$Selections = $LogNamesDB | Select-object LogName, ProviderName, Type, IsEnabled, IsClassic | sort-object -property LogName, ProviderNane | Out-GridView -Title "Select one or more log files to extract event id details from." -PassThru
@@ -104,40 +110,48 @@ foreach ($Selection in $Selections) {
     if (($metaData) -and ($metadata.LogLinks)) {
 
         # some providers are linked to multiuple log types, check each link
-        foreach ($LogLink in $metaData.LogLinks) {       
+#        $metaData.LogLinks | ?{$_.LogName -match $Selection.LogName}
 
             # now make sure this link matches one the user selected.
-            if ($LogLink.LogName -eq $Selection.LogName) {
+#            if ($LogLink.LogName -eq $Selection.LogName) {
 
-                write-debug "Found link to selected [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
+#                write-debug "Found link to selected [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
 
-                $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
+        $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
 
-                foreach ($eventData in $metaData.Events) {
+        foreach ($eventData in $metaData.Events) {
 
-                    # only append if there is a useful description
-                    if (($eventdata.Description) -and ($eventdata.Level.DisplayName -ne $null)) {
+            $LogName = [string]($eventdata.LogLink).LogName
 
-                        $info = @{
-                            "Provider" =  $Selection.ProviderName
+            if ($LogName -ne $Selection.LogName) { 
+                write-host "skipping $($LogName)." 
+            } else {
+                write-host "including $($LogName)." 
+            
 
-                            "LogName" = $LogLink.LogName
-                            "EventID" = $eventdata.Id
-                            "Version" = $eventdata.Version
-                            "Level" = $eventdata.Level.DisplayName
-                            "Description" = $eventdata.Description -replace "\n","; "
+                # only append if there is a useful description
+                if (($eventdata.Description) -and ($eventdata.Level.DisplayName -ne $null)) {
+
+                    $info = @{
+                        "Provider" =  $Selection.ProviderName
+
+                        "LogName" = $LogName
+                        "EventID" = $eventdata.Id
+                        "Version" = $eventdata.Version
+                        "Level" = $eventdata.Level.DisplayName
+                        "Description" = $eventdata.Description -replace "\n","; "
                                 
-                            "IsEnabled" = $EventLogConfiguration.IsEnabled
-                            "IsClassic" = $EventLogConfiguration.IsClassicLog                               
-                            "Type" = $EventLogConfiguration.LogType
+                        "IsEnabled" = $EventLogConfiguration.IsEnabled
+                        "IsClassic" = $EventLogConfiguration.IsClassicLog                               
+                        "Type" = $EventLogConfiguration.LogType
 
-                            "Index" = "$($LogLink.LogName) $($Selection.ProviderName) $($EventLogConfiguration.LogType) $($eventdata.Id) $($eventdata.Version)"
-
-                        }
-
-                        $EventDB += New-Object -TypeName PSObject -Property $info
+                        "Index" = "$($LogLink.LogName) $($Selection.ProviderName) $($EventLogConfiguration.LogType) $($eventdata.Id) $($eventdata.Version)"
 
                     }
+
+                    $Info
+
+                    $EventDB += New-Object -TypeName PSObject -Property $info
 
                 }
             }
@@ -148,7 +162,9 @@ foreach ($Selection in $Selections) {
 
 $EventDB = ($EventDB | Sort-Object Index | Get-Unique -AsString)
 
-$SelectedEvents = $EventDB | Sort-Object -Property Id | Select-Object -Property LogName, Provider, Type, EventID, Version, Level, Description | sort-object -property Provider, Type, LogName, EventID | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
+$SelectedEvents = $EventDB | Select-Object -Property LogName, Provider, Type, EventID, Version, Level, Description | sort-object -property Provider, LogName, EventID | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
+
+if (!($SelectedEvents)) { exit }
 
 $PossibleActions = @("Export selected items to CSV file","Convert selected to Splunk inputs","Convert selected to Splunk searches")
 $SelectedActions = $PossibleActions | Out-GridView -PassThru -Title "Select action(s) to take on selected items."
