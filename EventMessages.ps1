@@ -1,251 +1,249 @@
-<# TODO:
-if logtype is classic, get localized $metaData.MessageFilePath
-e.g. c:\windows\syswow64\en-us\esent.dll.mui 
-The file has a message table which contains the ID (in hex) and Messages (as strings).  
-Unforunately, ID/message levels are not defined for classic logs
+$uri = "https://systemcenter.wiki/"
 
-https://nsis.sourceforge.io/Reading_Message_Table_resources_from_DLL_files
-GetSystemDefaultLangID --> LoadLibraryExW --> FormatMessageW --> FreeLibrary
+<#
+$DebugPreference = "Continue"           # Debug Mode
+$DebugPreference = "SilentlyContinue"   # Normal Mode
 #>
 
+function Get-ElementLinks {
+    [CmdletBinding()]
+    Param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("Task", "Discovery", "Rule","LinkedReport")]
+    [String[]]
+    $ElementType)
 
-function ConvertTo-SplunkSearch {
-    param($SelectedEvent)
-    # Transform event into splunk search:
-    $search = "source=`"*WinEventLog:$($SelectedEvent.LogName)`" `"<EventID>$($SelectedEvent.EventID)</EventID>`" OR EventCode=`"$($SelectedEvent.EventID)`""  #primary search.. Can't assume eventcode is extracted yet.
+    $ElementUri = "$($uri)?GetElements=$($ElementType)&Category=$($Category)"
+    $ElementContent = Invoke-WebRequest -Uri $ElementUri
+    $Links = @($ElementContent.Links)
+    # | ?{$_.innerText -match "$($ElementType)"})
 
-    # extract the "data" fields that are unique to each event id but defined in provider template.
-    $dataitems = $SelectedEvent.Template -split "`n" | Select-String -Pattern "data name="
-    $fields = ""
-    foreach ($dataitem in $dataitems) {
-        $Data = ([regex]"<data name=`"([^`"]+)`"").match($dataitem).groups[1].value
-        if ($fields -eq "") {
-            $fields = "$($Data)"
-        } else {
-            $fields += ", $($Data)"
-        }
-    }
-    $search += "`n | table _time host source EventID $($fields) `n | sort 0 - _time"
-    return $search
+    return $Links
 }
 
-# add type allowing interaction with eventlog data
-Add-Type -AssemblyName System.Core
+# grab the main page of the uri
+$WebContent = Invoke-WebRequest -Uri $uri
 
-# Get the EventLogSession object
-$EventSession = [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession;
+# get the link objects relating to Management Package Catalog
+$mpCatalog = $WebContent.Links | ?{$_.outerHtml -match "GetCategory"}
 
-$EventProviderNames = $EventSession.GetProviderNames()
+# here is a key word list of products we care about
+$ProductKeyWords = @("Active Directory","Cisco","Citrix","Dell Client","DFS","DFS","F5","File Services","Printer Monitoring","PowerShell","QLogic","RedHat","Skype","SQL","Docker","Operating System","Cluster","DHCP","DNS","iSCSI","Group Policy","IIS","Xerox")
+$ProductKeyWords = @("Skype.*2019")
+$ProductKeyWordsString = $ProductKeyWords -join "|"
 
-# link providers to log names
-if (!($LogNamesDB)) {
-    $LogNamesDB = @()
-    $Progress = 0
-    foreach ($EventProviderName in $EventProviderNames) {
+# get the mp catalog link relating to products we care abouut
+$mpCatalog = $mpCatalog | ?{$_.innerText -match "($($ProductKeyWordsString))"}
 
-        $Progress++
+# 61 = windows client
 
-        Write-Progress -activity "Building list log names linked from log providers." -status "Evaluating provider $($Progress) of $($EventProviderNames.count) - [$($EventProviderName)]." -PercentComplete $(($Progress/$EventProviderNames.count)*100)
-    
-        Try {
-            $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $EventProviderName
-        } catch {
-            Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($EventProviderName)."
-            continue
+$PerfmonObjects = @()
+$WinEventLogObjects = @()
+
+foreach ($item in $mpCatalog) {
+
+    $result = Invoke-WebRequest -Uri $item.href 
+    $resultTable = @{}
+
+    # Get the title
+    $resultTable.title = $result.ParsedHtml.title
+
+    # Get the HTML Tag
+    $HtmlTag = $result.ParsedHtml.childNodes | Where-Object {$_.nodename -eq 'HTML'} 
+
+    # Get the HEAD Tag
+    $HeadTag = $HtmlTag.childNodes | Where-Object {$_.nodename -eq 'HEAD'}
+
+    # Get the Meta Tags
+    $MetaTags = $HeadTag.childNodes| Where-Object {$_.nodename -eq 'META'}
+
+    write-debug "Working on `"$($resultTable.title)`""
+
+    # TODO: Get the MP description
+    $resultTable.description = $metaTags  | Where-Object {$_.name -eq 'description'} | Select-Object -ExpandProperty content
+
+
+    # Get the MP Category
+    $Category = ($item.href -split "=")[1]
+
+    # TODO: Get Monitoring Rule Element
+    $Links = Get-ElementLinks -ElementType Rule
+
+
+    $counter = 0
+    $outputfolder = "C:\apps\skype"
+    foreach ($link in $Links | ?{$_.href -match "Rule"} | ?{$_.href -notmatch "perf"}) {
+
+        # unescape amperstand from link and follow it
+        $href = $link.href -replace "&amp;","&"
+        write-host "trying $($href)"
+
+        $content = @()
+        try { 
+            $content = Invoke-WebRequest -Uri $href
+        } catch { write-host "there was a problem with URI $($href)." ; return 1 }
+
+        # get the content of the knolwedge base for the element
+        $content_kb = $content.AllElements | ?{$_.class -match "ScrollArea KnowledgeBase"} | Select -ExpandProperty OuterText
+
+        # get the content of the code for the element
+        $content_code = $content.ParsedHtml.getElementsByTagName('PRE') | select -expand innertext
+        $content_code = [xml]$content_code
+
+        # extract useful elements of the code and place in object
+
+        # process event log elements
+        if ($content_code.Rule.Category -eq "EventCollection") {
+
+            <#
+            $counter++
+            $outputfile = "$($outputfolder)\$($content_code.Rule.id).xml"
+            Set-Content -Path $outputfile -Value $content_code.Rule.DataSources.DataSource.OuterXml
+
+            if ($counter -eq 10) { break }
+            #>
+
+            $info = @{
+                'MPName' = $resultTable.title | select
+                'RuleName' = $link.outerText | select
+                'id' = $content_code.rule.ID | select
+                'Target' = $content_code.rule.Target | select
+                'Category' = $content_code.Rule.Category | select
+                'LogName' = $content_code.Rule.DataSources.DataSource.LogName | select
+                'SourceName' = ($content_code.rule.DataSources.DataSource.Expression.and.Expression | ?{$_.SimpleExpression.ValueExpression.xpathquery.'#text' -eq "PublisherName"}).SimpleExpression.ValueExpression.Value | select-object -ExpandProperty InnerText
+                'EventDisplayNumber' = ($content_code.rule.DataSources.DataSource.Expression.and.Expression | ?{$_.SimpleExpression.ValueExpression.xpathquery.'#text' -eq "EventDisplayNumber"}).SimpleExpression.ValueExpression.Value | select-object -ExpandProperty InnerText
+                'KBArticle' = ($content_kb) | Select
+                
+            }
+            if ($info.LogName -ne $null) { 
+                $WinEventLogObjects += New-Object -TypeName PSObject -Property $info              
+            }
+
         }
 
-        # if there is not metadata or log link, skip
-        if (($metaData) -and ($metadata.LogLinks)) {
 
-            # some providers are linked to multiuple log types, check each link
-            foreach ($LogLink in $metaData.LogLinks) { 
-
-                Try {
-                    $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
-
-                    # skip analytic, debug and classic logs
-                    if (($EventLogConfiguration.LogType -notmatch "(Analytical|Debug)") -and ($EventLogConfiguration.IsClassicLog -eq $false)) {
-
-        
-                        $info = @{
-                            "LogName" = $LogLink.LogName
-                            "ProviderName" = $EventProviderName
-                            "IsEnabled" = $EventLogConfiguration.IsEnabled
-                            "IsClassic" = $EventLogConfiguration.IsClassicLog
-                            "Type" = $EventLogConfiguration.LogType                                          
-                        }
-
-                        $LogNamesDB += New-Object -TypeName PSObject -Property $info
-                    }
-                } catch {
-                    Write-debug "Error accessing System.Diagnostics.Eventing.Reader.EventLogConfiguration properties of $($LogLink.LogName)."
-                }
-
+        # process performance monitor elements
+        if ($content_code.Rule.Category -eq "PerformanceCollection") {
+            $info = @{
+                'MPName' = $resultTable.title | select
+                'RuleName' = $link.outerText | select
+                'id' = $content_code.rule.ID | select
+                'Target' = $content_code.rule.Target | select
+                'Category' = $content_code.Rule.Category | select
+                'ObjectName' = $content_code.Rule.DataSources.DataSource.ObjectName | select
+                'CounterName' = $content_code.Rule.DataSources.DataSource.CounterName | select
+                'Frequency' = $content_code.Rule.DataSources.DataSource.Frequency | select
+                'Tolerance' = $content_code.Rule.DataSources.DataSource.Tolerance | select
+                'MaximumSampleSeparation' = $content_code.Rule.DataSources.DataSource.MaximumSampleSeparation | select
+                'KBArticle' = $content_kb | select
+            }
+            if ($info.ObjectName -ne $null) { 
+                $PerfmonObjects += New-Object -TypeName PSObject -Property $info        
             }
         }
-    }
-}
-# Present the user a list of distinct logs they want to examine event details of.
-#?{$_.IsClassic -eq $True} | 
-[array]$Selections = $LogNamesDB | Select-object LogName, ProviderName, Type, IsEnabled, IsClassic | sort-object -property LogName, ProviderNane | Out-GridView -Title "Select one or more log files to extract event id details from." -PassThru
 
-# Now build a database of the event id details of each log selected
-$EventDB = @()
-$Progress = 0
-foreach ($Selection in $Selections) {
-    $Progress++
-
-    Write-Progress -activity "Loading event log metadata from provider of selected logs." -status "Evaluating log $($Progress) of $($Selections.count) - [$($Selection)]." -PercentComplete $(($Progress/$Selections.count)*100)
-
-    write-debug "Looking for [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
-
-    Try {
-        $metaData = New-Object -TypeName System.Diagnostics.Eventing.Reader.ProviderMetadata -ArgumentList $Selection.ProviderName
-    } catch {
-        Write-debug "Error accessing Eventing.Reader.ProviderMetadata properties of $($Provider)."
-        continue
     }
 
-    # if there is not metadata or log link, skip
-    if (($metaData) -and ($metadata.LogLinks)) {
-
-        # some providers are linked to multiuple log types, check each link
-#        $metaData.LogLinks | ?{$_.LogName -match $Selection.LogName}
-
-            # now make sure this link matches one the user selected.
-#            if ($LogLink.LogName -eq $Selection.LogName) {
-
-#                write-debug "Found link to selected [$($selection.LogName)] log sourced from [$($selection.ProviderName)] provider."
-
-        $EventLogConfiguration = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration -ArgumentList $LogLink.LogName
-
-        foreach ($eventData in $metaData.Events) {
-
-            $LogName = [string]($eventdata.LogLink).LogName
-
-            if ($LogName -eq $Selection.LogName) { 
-
-                # only append if there is a useful description
-                if (($eventdata.Description) -and ($eventdata.Level.DisplayName -ne $null)) {
-
-                    $info = @{
-                        "Provider" =  $Selection.ProviderName
-
-                        "LogName" = $LogName
-                        "EventID" = $eventdata.Id
-                        "Version" = $eventdata.Version
-                        "Level" = $eventdata.Level.DisplayName
-                        "Description" = $eventdata.Description -replace "\n","; "
-                                
-                        "IsEnabled" = $EventLogConfiguration.IsEnabled
-                        "IsClassic" = $EventLogConfiguration.IsClassicLog                               
-                        "Type" = $EventLogConfiguration.LogType
-
-                        "Index" = "$($LogLink.LogName) $($Selection.ProviderName) $($EventLogConfiguration.LogType) $($eventdata.Id) $($eventdata.Version)"
-
-                    }
-
-                    $EventDB += New-Object -TypeName PSObject -Property $info
-
-                }
-            }
-        }
-    }
 }
 
 
-$EventDB = ($EventDB | Sort-Object Index | Get-Unique -AsString)
+# Define the base output folder
+$Outputfolder = "c:\apps\Skype"
+if (!(Test-Path -Path $outputfolder)) {
+    write-host "Output folder path not found: $($outputfolder)."
+    exit
+}
 
-$SelectedEvents = $EventDB | Select-Object -Property LogName, Provider, Type, EventID, Version, Level, Description | sort-object -property Provider, LogName, EventID | Out-GridView -PassThru -Title "Select an EventLog ID of Interest" 
+# get the unique components of Skype services.  There might should be a splunk app targeted to each component host
+$Components = $WinEventLogObjects | Select-Object -Unique -Property Target
+foreach ($Component in $Components.target) {
 
-if (!($SelectedEvents)) { exit }
+    # make sure the app folder exists
+    $ComponentShort = ($Component -split "\.")[-1]
+    #$appfolder = "$($outputfolder)\TA-SFB-$($ComponentShort)"  
+    $appfolder = "$($outputfolder)\TA-SFB2019"  
 
-$PossibleActions = @("Export selected items to CSV file","Convert selected to Splunk inputs","Convert selected to Splunk searches")
-$SelectedActions = $PossibleActions | Out-GridView -PassThru -Title "Select action(s) to take on selected items."
+    if (!(Test-Path -Path $appfolder)) { New-Item -Path $appfolder -ItemType Directory | Out-Null }   
 
+    # make sure the app LOCAL folder exists
+    $appFolderLocal = "$($appfolder)\local"
+    if (!(test-path -path $appFolderLocal)) { New-Item -Path $appFolderLocal -ItemType Directory | Out-Null}
 
-# get a random string for output filenames to share
-$rando = get-random -Minimum 100 -Maximum 999
+    # define path to inputs.conf
+    $appInputsConf = "$($appFolderLocal)\inputs.conf"
 
-foreach ($SelectedAction in $SelectedActions) {
+    # get the eventlogs for this target
+    $ComponentEvents = $WinEventLogObjects | ?{$_.target -eq $Component}
 
-    if ($SelectedAction -match "CSV") {
-        # do the CSV file task
+    # handle each unique log name
+    foreach ($LogName in $ComponentEvents | Select-Object -Unique -ExpandProperty LogName) {
 
-        # prepare the temp file
-        $EventMessagesOutputCSV = "$($env:temp)\EventMessages_csv_$($rando).csv"
-        if (Test-Path -Path $EventMessagesOutputCSV) { Remove-Item -Path $EventMessagesOutputCSV -Force }
+        $ComponentEventsForLogName = $ComponentEvents | ?{$_.LogName -eq $LogName}
 
-        # commit the output and display for user
-        $SelectedEvents | Export-Csv -Path $EventMessagesOutputCSV -NoTypeInformation
-        write-host "CSV file written to $($EventMessagesOutputCSV)."
-        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputCSV
+        # Combine information into splunk inputs.conf stanza
+        $Stanza = @()
+        $Stanza += ""
+        $Stanza += "# Event Collection Stanza for Skype $($ComponentShort) component."
+        $Stanza += "[WinEventLog://$($LogName)]"
+        $Stanza += "index = main"
+
+        # Build whitelist of EventCodes to collect for each SourceName
+        $ComponentSourceNames = $ComponentEventsForLogName | Select-Object -Unique SourceName
+        $counter = -1
+        foreach ($ComponentSourceName in $ComponentSourceNames.SourceName) {
+            $counter++
+            $ComponentSourceNameEvents = $ComponentEventsForLogName | ?{$_.SourceName -eq $ComponentSourceName}
+            $EventCodes = $ComponentSourceNameEvents.EventDisplayNumber -join "|"
+            $Stanza += "whitelist.$($counter) = SourceName=%^`($($ComponentSourceName)`)$% EventCode=%^`($($EventCodes)$`)%"
+        }
+
+        write-host "Writing $($Stanza.count) eventlog stanza lines to $($appInputsConf)."
+        Add-Content -Path $appInputsConf -value $Stanza
+
     }
 
-    if ($SelectedAction -match "inputs") {
-        # do the Splunk inputs file task
+}
 
-        # prepare the temp file
-        $EventMessagesOutputInputs = "$($env:temp)\EventMessages_csv_$($rando).csv"
-        if (Test-Path -Path $EventMessagesOutputInputs) { Remove-Item -Path $EventMessagesOutputInputs-Force }
 
-        # prepare the content
-        $Content = @()
+# get the perfmon logs of interest for this target
+$Components = $PerfmonObjects | Select-Object -Unique -Property Target
+foreach ($Component in $Components.target) {
 
-        # group the selected events by sourcetype
-        $LogNames = ($SelectedEvents | group LogName).Name
+    # make sure the app folder exists
+    $ComponentShort = ($Component -split "\.")[-1]
+    #$appfolder = "$($outputfolder)\TA-SFB-$($ComponentShort)"  
+    $appfolder = "$($outputfolder)\TA-SFB2019"  
+    if (!(Test-Path -Path $appfolder)) { New-Item -Path $appfolder -ItemType Directory  | Out-Null }
 
-        foreach ($LogName in $LogNames) {
-            $Events = $SelectedEvents | ?{$_.LogName -eq "$($LogName)"}
-            $Content += ""
-            $Content += "[WinEventLog://$($LogName)]"
-            $Content += "index = main"
-            
-            # build a list of EventTypes to include in a sample filtering array
-            $NameTypes="" 
-            $Events | group Level | select -expandproperty Name | %{if ($NameTypes -eq "") { $NameTypes += $_ } else { $NameTypes += "|" + $_ }} ; $NameTypes = "(" + $NameTypes + ")"
-            $content += "#whitelist.1 = Type=%^$($NameTypes)$%"
+    # make sure the app LOCAL folder exists
+    $appFolderLocal = "$($appfolder)\local"
+    if (!(test-path -path $appFolderLocal)) { New-Item -Path $appFolderLocal -ItemType Directory | Out-Null}
 
-            # build a list of EventCodes to include in a sample filtering array
-            $eEventCodes = ""
-            $Events | group EventID | Select -ExpandProperty Name | %{if ($eEventCodes -eq "") { $eEventCodes += $_ } else { $eEventCodes += "|" + $_ }} ; $eEventCodes = "(" + $eEventCodes + ")" 
-            $content += "#blacklist.1 = EventCode=%^$($eEventCodes)$%"
+    # define path to inputs.conf
+    $appInputsConf = "$($appFolderLocal)\inputs.conf"
 
-            # build a list of event descriptions to reference in inputs file
-            $eDescriptions = @()
-            foreach ($Event in $Events) {
-                $eDescriptions += "# EventID: $($Event.EventID), Level: $($Event.Level), Description: $($Event.Description)"
-            }
-            $content += $eDescriptions
-            Add-Content -Path $EventMessagesOutputInputs -value $Content
-        }
+    # get the perfmon objects for this target
+    $TargetPerfmonObjects = $PerfmonObjects | ?{$_.target -eq $Component}   
+
+    # handle each unique log name
+    foreach ($TargetPerfmonObject in $TargetPerfmonObjects | Select-Object -Unique -ExpandProperty ObjectName) {
+
+        $TargetPerfmonObjectsForObjectName = $TargetPerfmonObjects | ?{$_.ObjectName -eq $TargetPerfmonObject}
+
+        # Combine information into splunk inputs.conf stanza
+        $Stanza = @()
+        $Stanza += ""
+        $Stanza += "# Event Collection Stanza for Skype $($ComponentShort) component."
+        $Stanza += "[perfmon://$($TargetPerfmonObject)]"
+        $Stanza += "index = main"
+        $Stanza += "object = $($TargetPerfmonObject)"
+        $Stanza += "instance = *"
       
-        # commit the output and display for user
-        write-host "Splunk inputs written to $($EventMessagesOutputInputs)."
-        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputInputs
+        [string]$counters = $TargetPerfmonObjectsForObjectName.CounterName -join ";"
+        $Stanza += "counter = $($counters)"
 
-    }
+        write-host "Writing $($Stanza.count) perfmon stanza lines to $($appInputsConf)."
+        Add-Content -Path $appInputsConf -value $Stanza
 
-    if ($SelectedAction -match "searches") {
-        # do the Splunk searches 
-
-        # prepare the temp file
-        $EventMessagesOutputSearch = "$($env:temp)\EventMessages_searches_$($rando).csv"
-        if (Test-Path -Path $EventMessagesOutputSearch) { Remove-Item -Path $EventMessagesOutputSearch -Force }
-
-        # prepare the content
-        $Content = @()
-        foreach ($SelectedEvent in $SelectedEvents) {
-            $Search = ConvertTo-SplunkSearch -SelectedEvent $SelectedEvent
-            $Content += "`n$($search)"
-        }
-        
-        # commit the output and display for user
-        Add-Content -Path $EventMessagesOutputSearch -value $Content
-        write-host "Splunk SPL statements written to $($EventMessagesOutputSearch)."
-        Start-Process -FilePath "Notepad.exe" -ArgumentList $EventMessagesOutputSearch
     }
 }
-
-
-#>
