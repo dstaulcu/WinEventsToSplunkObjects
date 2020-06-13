@@ -192,12 +192,34 @@ foreach ($SelectedAction in $SelectedActions) {
         # prepare the content
         $Content = @()
 
+        # sample the log volume on current machine
+        $Events = Get-WinEvent -LogName $LogName
+        $Events = Get-WinEvent -logname "Microsoft-Windows-Storsvc/Diagnostic"
+        foreach ($Event in $Events) {
+            #add a field to the each event indicating the minute of life the event occured within
+            $Year = '{0:d4}' -f $Event.TimeCreated.Year
+            $Month = '{0:d2}' -f  $Event.TimeCreated.Month
+            $Day = '{0:d2}' -f  $Event.TimeCreated.Day
+            $Hour = '{0:d2}' -f  $Event.TimeCreated.Hour
+            $Minute = '{0:d2}' -f  $Event.TimeCreated.Minute
+            $YearDayHourMinute = "$($Year)$($Month)$($Day)$($Hour)$($Minute)"
+            Add-Member -InputObject $Event -MemberType NoteProperty -Force -Name  "MinuteOfLife" -Value $YearDayHourMinute
+        }
+        $sortedEvents = $events | Sort-Object -Property TimeCreated 
+        $earliestEvent = $events | Select-Object -ExpandProperty TimeCreated -Last 1
+        $latestEvent = $events | Select-Object -ExpandProperty TimeCreated -First 1
+        $timeSpanDays = [math]::round((New-TimeSpan -Start $earliestEvent -End $latestEvent).TotalDays,0)
+        $maxLoad = $events | Group-Object -Property MinuteOfLife | Sort-Object -Descending Count | Select-Object -First 1 -ExpandProperty Count
+        $totalCount = $events.Count
+
+
         # group the selected events by sourcetype
         $LogNames = ($SelectedEvents | group LogName).Name
 
         foreach ($LogName in $LogNames) {
             $Events = $SelectedEvents | ?{$_.LogName -eq "$($LogName)"}
             $Content += ""
+            $content += "# Note: `"$($LogName)`" had $($totalCount) events over $($timeSpanDays) days with peak load of $($maxLoad) events in one minute."
             $Content += "[WinEventLog://$($LogName)]"
             $Content += "index = main"
             
